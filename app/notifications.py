@@ -47,8 +47,7 @@ async def notify_supervisor_of_postponement(supervisor_user_id: int, subordinate
         print("❌ Ошибка: не удалось получить детали задания.")
         return
 
-    # Предполагается, что fetch_task_details возвращает кортеж в следующем порядке:
-    # (TaskID, CreatorID, Text, StartOfTerm, Deadline)
+
     task_text = task_details[2]
     start_of_term = task_details[3]
     current_deadline = task_details[4]

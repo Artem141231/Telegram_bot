@@ -156,7 +156,7 @@ async def assigned_tasks(message: Message, state: FSMContext):
 async def subordinate(message: Message, state: FSMContext):
     data = await state.get_data()
     user_id = data.get("user_id")
-    current_role = data.get("role_status")  # например, "Senior Executive" или "Middle Manager"
+    current_role = data.get("role_status")
     if not user_id or not current_role:
         await message.answer("Ошибка: пользователь не авторизован. Пожалуйста, перезапустите /start")
         return
@@ -476,7 +476,7 @@ async def process_subordinate_task_choice(message: Message, state: FSMContext):
     await message.answer(
         f"Вы выбрали задание с ID {chosen_task_id}.\n"
         "Чтобы запросить перенос дедлайна, нажмите кнопку ниже.",
-        reply_markup=kb.Select_task  # inline-клавиатура с кнопкой "Запросить перенос дедлайна"
+        reply_markup=kb.Select_task
     )
 
 
@@ -573,18 +573,16 @@ async def process_postponement_confirmation(callback: CallbackQuery, state: FSMC
 
 @router.callback_query(F.data.startswith("confirm_supervisor"))
 async def supervisor_confirm_postponement(callback: CallbackQuery):
-    # Разбиваем callback.data по двоеточию
-    # Предположим, формат: "confirm_supervisor:task_id:subordinate_id:deadline_str"
+
     _, task_id, subordinate_id, deadline_str = callback.data.split(":")
-    # Преобразуем строку в datetime (формат DD-MM-YYYY)
+
     requested_deadline = datetime.datetime.strptime(deadline_str, "%d-%m-%Y")
 
-    # await fetch_update_task(int(task_id), requested_deadline)
 
-    # Обновляем поле Deadline в таблице Task, устанавливая его равным requested_deadline
+
     await fetch_update_task_for_deadline(int(task_id), requested_deadline)
 
-    # Обновляем запись в таблице Task_Assignees: устанавливаем PostponementOfDeadline = requested_deadline и PostponementStatus = "Одобрено"
+
     await fetch_update_task_postponement(int(task_id), int(subordinate_id), requested_deadline, "Одобрено")
 
     await callback.message.answer("✅ Запрос переноса дедлайна одобрен. Дедлайн задания обновлен.")
