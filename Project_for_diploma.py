@@ -1,14 +1,12 @@
 import asyncio
-from aiogram import Bot,Dispatcher, F
+from aiogram import Dispatcher
 from app.handlers import router
-
+from bot import bot
 
 async def main():
-    bot = Bot(token="6435482939:AAF7ib36NMqxsSKiX2qLvQuH4YFjYMFbBLI")
     dp = Dispatcher()
     dp.include_router(router)
     await dp.start_polling(bot)
-
 
 if __name__ == '__main__':
     try:
