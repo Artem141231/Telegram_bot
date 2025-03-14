@@ -21,14 +21,16 @@ def remove_keyboard():
 
 
 SeniorExecKeyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Посмотреть назначенные задачи")],
-                                     [KeyboardButton(text="Выбрать подчинённого")]],
+                                     [KeyboardButton(text="Выбрать подчинённого")],
+                                     [KeyboardButton(text="Сформировать отчёт")]],
                            resize_keyboard=True,
                            input_field_placeholder="Выберите пункт меню")
 
 
 MiddleManagerKeyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Посмотреть назначенные задачи")],
                                      [KeyboardButton(text="Выбрать подчинённого")],
-                                    [KeyboardButton(text="Выбрать задание")]],
+                                    [KeyboardButton(text="Выбрать задание")],
+                                    [KeyboardButton(text="Сформировать отчёт")]],
                            resize_keyboard=True,
                            input_field_placeholder="Выберите пункт меню")
 
@@ -36,8 +38,7 @@ MiddleManagerKeyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="По
 Select_subordinate = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Удалить существующие задания",callback_data="Delete_task")],
     [InlineKeyboardButton(text="Добавить новое задание",callback_data="Add_task")],
-    [InlineKeyboardButton(text="Редактировать задание",callback_data="Edit_task")],
-    [InlineKeyboardButton(text="Сформировать отчёт",callback_data="Generate_report")]]) # Еще_не_реализовал
+    [InlineKeyboardButton(text="Редактировать задание",callback_data="Edit_task")]])
 
 
 SubordinateKeyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Посмотреть назначенные задачи")],
@@ -65,7 +66,7 @@ Yes_or_not_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 
 
 def supervisor_postponement_keyboard(task_id: int, subordinate_id: int, requested_deadline: datetime.datetime):
-    deadline_str = requested_deadline.strftime("%d-%m-%Y")
+    deadline_str = requested_deadline.strftime("%d-%m-%Y %H:%M")
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(

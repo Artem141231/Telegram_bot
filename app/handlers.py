@@ -9,13 +9,16 @@ from database.requests import (fetch_user_by_login, fetch_assigned_tasks,fetch_u
                                fetch_delete_task_assignee,fetch_delete_task, fetch_type_by_id,
                                fetch_update_task_postponement,fetch_task_details,
                                fetch_update_task_status,fetch_update_telegram_id,
-                               fetch_assigned_tasks_enumeration_for_subordinates, fetch_update_task_for_deadline)
+                               fetch_assigned_tasks_enumeration_for_subordinates, fetch_update_task_for_deadline,
+                               fetch_report_for_subordinates)
 
-from app.notifications import notify_creator_task_completed, notify_supervisor_of_postponement
+from app.notifications import (notify_creator_task_completed, notify_supervisor_of_postponement,
+                               notify_subordinate_of_new_task,notify_subordinate_of_edited_task,
+                               notify_subordinate_of_deleted_task,notify_subordinate_of_postponement_result)
 import app.keydoards as kb
 import datetime
 import asyncio
-
+import bcrypt
 
 router = Router()
 
@@ -52,6 +55,18 @@ class TaskPostponement(StatesGroup):
     confirming_request = State()       # подтверждение запроса
 
 
+async def verify_password_async(provided_password: str, stored_hash: str) -> bool:
+    """
+    Асинхронно проверяет, соответствует ли предоставленный пароль хешу,
+    выполняя bcrypt.checkpw в отдельном потоке.
+    """
+    return await asyncio.to_thread(
+        bcrypt.checkpw,
+        provided_password.encode('utf-8'),
+        stored_hash.encode('utf-8')
+    )
+
+
 @router.message(CommandStart())
 async def Start_Authorization(message: Message, state: FSMContext):
     await state.clear()
@@ -78,7 +93,8 @@ async def authorization_password(message: Message, state: FSMContext):
     provided_password = message.text
     user = await fetch_user_by_login(login)
     if user:
-        if provided_password == user.Password:
+        # Используем асинхронную проверку пароля
+        if await verify_password_async(provided_password, user.Password):
             # Получаем актуальный Telegram ID
             current_telegram_id = message.from_user.id
 
@@ -88,8 +104,7 @@ async def authorization_password(message: Message, state: FSMContext):
 
             # Получаем роль пользователя и продолжаем авторизацию
             user_type_id = user.TypeID
-            role_status = await fetch_type_by_id(
-                user_type_id)  # Например, "Senior Executive", "Middle Manager", "Subordinate"
+            role_status = await fetch_type_by_id(user_type_id)
             await state.update_data(user_id=user.UserID, role_status=role_status)
 
             if role_status == "Senior Executive":
@@ -106,6 +121,7 @@ async def authorization_password(message: Message, state: FSMContext):
     else:
         await message.answer("Пользователь не найден. Попробуйте ещё раз.")
         await state.clear()
+
 
 
 @router.callback_query(F.data == "cancel_operation")
@@ -143,10 +159,10 @@ async def assigned_tasks(message: Message, state: FSMContext):
         result_text = ""
         for index, row in enumerate(tasks, start=1):
             result_text += (f"{index}. Задача: {row.TaskText}\n"
-                            f"От: {row.CreatorFio} ({row.CreatorRole})\n"
-                            f"Для: {row.AssigneeFio} ({row.AssigneeRole})\n"
-                            f"Начало: {row.StartOfTerm}\n"
-                            f"Дедлайн: {row.Deadline}\n\n")
+                            f"👤 От: {row.CreatorFio} ({row.CreatorRole})\n"
+                            f"👤 Для: {row.AssigneeFio} ({row.AssigneeRole})\n"
+                            f"📅 Начало: {row.StartOfTerm}\n"
+                            f"⏳ Дедлайн: {row.Deadline}\n\n")
         await message.answer(result_text)
     else:
         await message.answer("Нет назначенных задач.")
@@ -167,9 +183,9 @@ async def subordinate(message: Message, state: FSMContext):
         available_ids = []
         for row in rows:
             result_text += (
-                f"ID: {row.UserID}\n"
-                f"Имя: {row.Fio}\n"
-                f"Тип: {row.Type}\n\n"
+                f"🆔 ID: {row.UserID}\n"
+                f"👤 Имя: {row.Fio}\n"
+                f"📌 Тип: {row.Type}\n\n"
             )
             available_ids.append(str(row.UserID))
         result_text += "Введите ID выбранного подчинённого или нажмите «Отмена»:"
@@ -196,13 +212,6 @@ async def handle_subordinate_selection(message: Message, state: FSMContext):
 @router.callback_query(F.data == "Add_task")
 async def add_task_callback(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите задание:")
-    await state.set_state(Task.entering_task)  # Переход к состоянию ввода текста задания
-    await callback.answer()
-
-
-@router.callback_query(F.data == "Add_task")
-async def add_task_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите задание:")
     await state.set_state(Task.entering_task)  # Переход в состояние ввода текста задания
     await callback.answer()
 
@@ -214,7 +223,7 @@ async def process_task(message: Message, state: FSMContext):
         await message.answer("Задание не может быть пустым. Введите ещё раз:")
         return
     await state.update_data(task_text=task_text)
-    await message.answer("Введите дедлайн в формате DD-MM-YYYY:")
+    await message.answer("Введите дедлайн в формате DD-MM-YYYY HH:MM")
     await state.set_state(Task.entering_deadline)
 
 
@@ -222,12 +231,12 @@ async def process_task(message: Message, state: FSMContext):
 async def process_deadline(message: Message, state: FSMContext):
     deadline_text = message.text.strip()
     try:
-        deadline_date = datetime.datetime.strptime(deadline_text, "%d-%m-%Y")
+        deadline_date = datetime.datetime.strptime(deadline_text, "%d-%m-%Y %H:%M")
         if deadline_date.date() < datetime.date.today():
             await message.answer("Дата не может быть в прошлом. Введите корректный дедлайн:")
             return
     except ValueError:
-        await message.answer("Неверный формат даты. Введите в формате YYYY-MM-DD:")
+        await message.answer("Неверный формат даты. Введите в формате DD-MM-YYYY HH:MM:")
         return
     data = await state.get_data()
     task_text = data.get("task_text")
@@ -244,6 +253,7 @@ async def process_deadline(message: Message, state: FSMContext):
         f"✅ Задание сохранено:\n📌 {task_text}\n📅 Дедлайн: {deadline_date.date()}\nTaskID: {task_id}\nAssignmentID: "
         f"{assignment_id}"
     )
+    await notify_subordinate_of_new_task(creator_id, task_id, subordinate_id)
 
 
 @router.callback_query(F.data == "Edit_task")
@@ -252,7 +262,8 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     subordinate_id = data.get("subordinate_id")
     creator_id = data.get("user_id")  # текущий менеджер
     if not subordinate_id or not creator_id:
-        await callback.message.answer("Ошибка: подчинённый или текущий пользователь не определён. Пожалуйста, выберите подчинённого.")
+        await callback.message.answer("Ошибка: подчинённый или текущий пользователь не определён. Пожалуйста, "
+                                      "выберите подчинённого.")
         await callback.answer()
         return
 
@@ -267,11 +278,11 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     available_task_ids = []
     for row in tasks:
         result_text += (
-            f"TaskID: {row.TaskID}\n"
-            f"Текст: {row.TaskText}\n"
-            f"Начало: {row.StartOfTerm}\n"
-            f"Дедлайн: {row.Deadline}\n"
-            f"Создатель: {row.CreatorFio}\n\n"
+            f"🆔 TaskID: {row.TaskID}\n"
+            f"📝 Текст: {row.TaskText}\n"
+            f"📅 Начало: {row.StartOfTerm}\n"
+            f"⏳ Дедлайн: {row.Deadline}\n"
+            f"👤 Создатель: {row.CreatorFio}\n\n"
         )
         available_task_ids.append(str(row.TaskID))
     result_text += "Введите ID задачи, которую хотите редактировать:"
@@ -309,7 +320,7 @@ async def process_new_text(message: Message, state: FSMContext):
         await message.answer("Текст не может быть пустым. Введите новый текст задания:")
         return
     await state.update_data(new_text=new_text)
-    await message.answer("Введите новый дедлайн в формате DD-MM-YYYY:")
+    await message.answer("Введите новый дедлайн в формате DD-MM-YYYY HH:MM")
     await state.set_state(TaskEditing.new_deadline)
 
 
@@ -320,27 +331,34 @@ async def process_new_deadline(message: Message, state: FSMContext):
     """
     new_deadline_text = message.text.strip()
     try:
-        new_deadline = datetime.datetime.strptime(new_deadline_text, "%d-%m-%Y")
+        new_deadline = datetime.datetime.strptime(new_deadline_text, "%d-%m-%Y %H:%M")
         if new_deadline.date() < datetime.date.today():
             await message.answer("Дедлайн не может быть в прошлом. Введите корректный дедлайн:")
             return
     except ValueError:
-        await message.answer("Неверный формат даты. Введите дату в формате DD-MM-YYYY:")
+        await message.answer("Неверный формат даты. Введите дату в формате DD-MM-YYYY HH:MM")
         return
 
     data = await state.get_data()
     new_text = data.get("new_text")
     task_id = data.get("task_id")
-    if not task_id:
-        await message.answer("Ошибка: не найден идентификатор задачи для редактирования.")
+    # Добавляем извлечение creator_id и subordinate_id:
+    creator_id = data.get("user_id")
+    subordinate_id = data.get("subordinate_id")
+
+    if not task_id or not creator_id or not subordinate_id:
+        await message.answer("Ошибка: не найдены необходимые идентификаторы для редактирования.")
         await state.clear()
         return
 
     # Обновляем задачу в базе данных
     await fetch_update_task(int(task_id), new_text, new_deadline)
 
+    # Уведомляем подчинённого о редактировании задания руководителем
+    await notify_subordinate_of_edited_task(creator_id, int(task_id), subordinate_id)
+
     await message.answer(
-        f"Задание обновлено:\nНовый текст: {new_text}\nНовый дедлайн: {new_deadline.date()}"
+        f"📌 Задание обновлено:\nНовый текст: {new_text}\n⏳ Новый дедлайн: {new_deadline.date()}"
     )
 
 
@@ -370,11 +388,11 @@ async def delete_task_callback(callback: CallbackQuery, state: FSMContext):
     available_task_ids = []
     for row in tasks:
         result_text += (
-            f"TaskID: {row.TaskID}\n"
-            f"Текст: {row.TaskText}\n"
-            f"Начало: {row.StartOfTerm}\n"
-            f"Дедлайн: {row.Deadline}\n"
-            f"Создатель: {row.CreatorFio}\n\n"
+            f"🆔 TaskID: {row.TaskID}\n"
+            f"📝 Текст: {row.TaskText}\n"
+            f"📅 Начало: {row.StartOfTerm}\n"
+            f"⏳ Дедлайн: {row.Deadline}\n"
+            f"👤 Создатель: {row.CreatorFio}\n\n"
         )
         available_task_ids.append(str(row.TaskID))
     result_text += "Введите ID задачи, которую хотите удалить:"
@@ -397,7 +415,6 @@ async def process_delete_choice(message: Message, state: FSMContext):
     await state.set_state(TaskDeletion.confirm)
 
 
-
 @router.callback_query(F.data == "confirm_delete")
 async def confirm_delete(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -411,14 +428,49 @@ async def confirm_delete(callback: CallbackQuery, state: FSMContext):
     # Удаляем запись из Task_Assignees
     await fetch_delete_task_assignee(int(task_id), int(subordinate_id))
     # Удаляем задачу из таблицы Task
+    creator_id = data.get("user_id")
+    if creator_id:
+        await notify_subordinate_of_deleted_task(creator_id, int(task_id), int(subordinate_id))
     await fetch_delete_task(int(task_id))
     await callback.message.answer(f"Задание с TaskID {task_id} успешно удалено.")
     await callback.answer()
+
 
 @router.callback_query(F.data == "cancel_delete")
 async def cancel_delete(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Удаление отменено.")
     await callback.answer()
+
+
+@router.message(F.text == "Сформировать отчёт")
+async def generate_report_message(message: Message, state: FSMContext):
+    # Получаем ID текущего руководителя (создателя заданий)
+    data = await state.get_data()
+    creator_id = data.get("user_id")
+    if not creator_id:
+        await message.answer("Ошибка: не найден ID руководителя. Пожалуйста, перезапустите /start.")
+        return
+
+    # Получаем отчёт по подчинённым
+    report = await fetch_report_for_subordinates(int(creator_id))
+    if not report:
+        await message.answer("Нет данных для формирования отчёта.")
+        return
+
+    # Формируем текст отчёта, включая должность (Position)
+    report_lines = ["Отчёт по подчинённым:"]
+    for subordinate in report:
+        report_lines.append(
+            f"🆔 ID: {subordinate['UserID']}\n"
+            f"👤 Подчинённый: {subordinate['Fio']}, Должность: {subordinate['Position']}\n"
+            f"✅ Выполнено заданий: {subordinate['Completed']}\n"
+            f"❌ Просрочено заданий: {subordinate['Overdue']}\n"
+            f"📌 Запросов на перенос дедлайна: {subordinate['RequestedPostponement']}\n"
+        )
+
+    report_text = "\n".join(report_lines)
+
+    await message.answer(report_text)
 
 
 
@@ -448,11 +500,11 @@ async def choose_own_task(message: Message, state: FSMContext):
     available_task_ids = []
     for row in tasks:
         result_text += (
-            f"TaskID: {row.TaskID}\n"
-            f"Текст: {row.TaskText}\n"
-            f"Начало: {row.StartOfTerm}\n"
-            f"Дедлайн: {row.Deadline}\n"
-            f"Создатель: {row.CreatorFio}\n\n"
+            f"🆔 TaskID: {row.TaskID}\n"
+            f"📝 Текст: {row.TaskText}\n"
+            f"📅 Начало: {row.StartOfTerm}\n"
+            f"⏳ Дедлайн: {row.Deadline}\n"
+            f"👤 Создатель: {row.CreatorFio}\n\n"
         )
         available_task_ids.append(str(row.TaskID))
     result_text += "Введите ID задачи, которую хотите выбрать:"
@@ -489,27 +541,11 @@ async def request_postponement_callback(callback: CallbackQuery, state: FSMConte
         await callback.answer()
         return
     await callback.message.answer(
-        "Введите новую дату переноса дедлайна в формате DD-MM-YYYY:",
+        "Введите новую дату переноса дедлайна в формате DD-MM-YYYY HH:MM",
         reply_markup=kb.cancel_keyboard
     )
     await state.set_state(TaskPostponement.entering_new_deadline)
     await callback.answer()
-
-
-@router.message(TaskPostponement.entering_new_deadline)
-async def process_postponement_deadline(message: Message, state: FSMContext):
-    new_deadline_text = message.text.strip()
-    try:
-        new_deadline = datetime.datetime.strptime(new_deadline_text, "%d-%m-%Y")
-        if new_deadline.date() < datetime.date.today():
-            await message.answer("Дата не может быть в прошлом. Введите корректную дату:")
-            return
-    except ValueError:
-        await message.answer("Неверный формат даты. Введите дату в формате DD-MM-YYYY:")
-        return
-    await state.update_data(requested_deadline=new_deadline)
-    await message.answer("Подтвердите запрос переноса дедлайна:", reply_markup=kb.Yes_or_not_keyboard)
-    await state.set_state(TaskPostponement.confirming_request)
 
 
 @router.message(TaskPostponement.entering_new_deadline)
@@ -519,12 +555,12 @@ async def process_postponement_deadline(message: Message, state: FSMContext):
     """
     new_deadline_text = message.text.strip()
     try:
-        new_deadline = datetime.datetime.strptime(new_deadline_text, "%d-%m-%Y")
+        new_deadline = datetime.datetime.strptime(new_deadline_text, "%d-%m-%Y %H:%M")
         if new_deadline.date() < datetime.date.today():
             await message.answer("Дата не может быть в прошлом. Введите корректную дату:")
             return
     except ValueError:
-        await message.answer("Неверный формат даты. Введите дату в формате YYYY-MM-DD:")
+        await message.answer("Неверный формат даты. Введите дату в формате DD-MM-YYYY HH:MM")
         return
 
     await state.update_data(requested_deadline=new_deadline)
@@ -557,7 +593,6 @@ async def process_postponement_confirmation(callback: CallbackQuery, state: FSMC
             return
 
         supervisor_id = task_details[1]  # Предполагаем, что CreatorID находится в task_details[1]
-        from app.notifications import notify_supervisor_of_postponement
         await notify_supervisor_of_postponement(
             supervisor_id,
             int(subordinate_id),
@@ -572,31 +607,42 @@ async def process_postponement_confirmation(callback: CallbackQuery, state: FSMC
 
 
 @router.callback_query(F.data.startswith("confirm_supervisor"))
-async def supervisor_confirm_postponement(callback: CallbackQuery):
+async def supervisor_confirm_postponement(callback: CallbackQuery, state: FSMContext):
+    _, task_id, subordinate_id, deadline_str = callback.data.split(":", 3)
+    requested_deadline = datetime.datetime.strptime(deadline_str, "%d-%m-%Y %H:%M")
 
-    _, task_id, subordinate_id, deadline_str = callback.data.split(":")
-
-    requested_deadline = datetime.datetime.strptime(deadline_str, "%d-%m-%Y")
-
-
-
+    # Обновляем Deadline в таблице Task – устанавливаем новый дедлайн равным запрошенному (или по логике, сегодняшней дате)
     await fetch_update_task_for_deadline(int(task_id), requested_deadline)
-
-
+    # Обновляем запись в таблице Task_Assignees: устанавливаем PostponementStatus на "Одобрено"
     await fetch_update_task_postponement(int(task_id), int(subordinate_id), requested_deadline, "Одобрено")
 
+    # Уведомляем руководителя об одобрении (уже отправляется выше, например, в сообщении)
     await callback.message.answer("✅ Запрос переноса дедлайна одобрен. Дедлайн задания обновлен.")
     await callback.answer()
 
+    # Дополнительно уведомляем подчинённого о результате
+    # supervisor_id получаем из деталей задания (предполагаем, что CreatorID находится в task_details[1])
+    task_details = await fetch_task_details(int(task_id))
+    if task_details:
+        supervisor_id = task_details[1]
+        await notify_subordinate_of_postponement_result(supervisor_id, int(subordinate_id), int(task_id), "approved", requested_deadline)
+
+
 
 @router.callback_query(F.data.startswith("cancel_supervisor"))
-async def supervisor_cancel_postponement(callback: CallbackQuery):
+async def supervisor_cancel_postponement(callback: CallbackQuery, state: FSMContext):
     _, task_id, subordinate_id = callback.data.split(":")
-
     await fetch_update_task_postponement(int(task_id), int(subordinate_id), None, "Отклонено")
 
     await callback.message.answer("❌ Запрос переноса дедлайна отклонён.")
     await callback.answer()
+
+    # Для уведомления подчинённого получаем supervisor_id из деталей задания
+    task_details = await fetch_task_details(int(task_id))
+    if task_details:
+        supervisor_id = task_details[1]
+        await notify_subordinate_of_postponement_result(supervisor_id, int(subordinate_id), int(task_id), "rejected")
+
 
 
 

@@ -349,6 +349,122 @@ async def fetch_subordinate_info(user_id: int):
     return await asyncio.to_thread(db_query, user_id)
 
 
+def get_tasks_with_deadline_in_range(target_start, target_end):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        query = """
+            SELECT t.TaskID, t.Text, t.Deadline, t.LastNotificationSent24, t.LastNotificationSent12, t.LastNotificationSent1, 
+                   ta.UserID AS AssigneeID
+            FROM dbo.Task t
+            JOIN dbo.Task_Assignees ta ON t.TaskID = ta.TaskID
+            WHERE t.Deadline BETWEEN ? AND ?
+        """
+        cursor.execute(query, target_start, target_end)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+    finally:
+        conn.close()
+
+
+
+def update_last_notification_sent(task_id: int, now):
+    """Вызывает хранимую процедуру для обновления LastNotificationSent"""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("EXEC update_last_notification_sent ?, ?", task_id, now)
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+
+def update_last_notification_sent_interval(task_id: int, interval: str, now: datetime.datetime):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("EXEC update_last_notification_sent_interval ?, ?, ?", task_id, interval, now)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_overdue_tasks():
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        query = """
+            SELECT t.TaskID, ta.UserID AS AssigneeID
+            FROM dbo.Task t
+            JOIN dbo.Task_Assignees ta ON t.TaskID = ta.TaskID
+            WHERE t.Deadline < GETDATE() AND ta.Status = 'В процессе'
+        """
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def mark_task_overdue(task_id: int, assignee_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    query = """
+            UPDATE dbo.Task_Assignees
+            SET Status = 'Просрочено', UpdatedAt = GETDATE()
+            WHERE TaskID = ? AND UserID = ?
+        """
+    cursor.execute(query, task_id, assignee_id)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_report_for_subordinates(creator_id: int):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        query = """
+            SELECT 
+                u.UserID, 
+                u.Fio,
+                t.Type AS Position,
+                SUM(CASE WHEN ta.Status = 'Выполнено' THEN 1 ELSE 0 END) AS Completed,
+                SUM(CASE WHEN ta.Status = 'Просрочено' THEN 1 ELSE 0 END) AS Overdue,
+                SUM(CASE WHEN ta.PostponementOfDeadline IS NOT NULL THEN 1 ELSE 0 END) AS RequestedPostponement
+            FROM dbo.Task_Assignees ta
+            JOIN dbo.Task tsk ON ta.TaskID = tsk.TaskID
+            JOIN dbo.Users u ON ta.UserID = u.UserID
+            JOIN dbo.Type t ON u.TypeID = t.TypeID
+            WHERE tsk.CreatorID = ?
+            GROUP BY u.UserID, u.Fio, t.Type
+        """
+        cursor.execute(query, creator_id)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+    finally:
+        conn.close()
+
+
+async def fetch_report_for_subordinates(creator_id: int):
+    return await asyncio.to_thread(get_report_for_subordinates, creator_id)
+
+
+async def fetch_mark_task_overdue(task_id: int, assignee_id: int):
+    await asyncio.to_thread(mark_task_overdue, task_id, assignee_id)
+
+
+
+async def fetch_overdue_tasks():
+    return await asyncio.to_thread(get_overdue_tasks)
+
+
+async def fetch_update_last_notification_sent_interval(task_id: int, interval: str, now: datetime.datetime):
+    await asyncio.to_thread(update_last_notification_sent_interval, task_id, interval, now)
+
 
 async def fetch_update_telegram_id(user_id: int, telegram_id: int):
     return await asyncio.to_thread(update_telegram_id, user_id, telegram_id)
